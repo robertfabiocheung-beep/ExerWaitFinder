@@ -2,8 +2,6 @@ import re
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
-from geopy.geocoders import Nominatim
-from geopy.distance import geodesic
 
 URL = "https://exerurgentcare.com/exer-locations/"
 HEADERS = {"User-Agent": "Mozilla/5.0"}
@@ -13,14 +11,6 @@ def wait_to_number(text):
         return 0
     match = re.search(r"(\d+)", text)
     return int(match.group(1)) if match else 999
-
-@st.cache_data(ttl=300)
-def geocode(place):
-    geolocator = Nominatim(user_agent="exer_wait_finder")
-    location = geolocator.geocode(place)
-    if location:
-        return location.latitude, location.longitude
-    return None
 
 @st.cache_data(ttl=300)
 def get_clinics():
@@ -54,62 +44,38 @@ def get_clinics():
             "xray": xray,
         }
 
-    return list(clinics.values())
+    return sorted(clinics.values(), key=lambda x: x["wait_num"])
 
 st.title("Exer Wait Finder")
 
-location = st.text_input(
-    "Enter your current location",
-    placeholder="Example: Covina, CA or 91723"
+search_area = st.text_input(
+    "Enter city or nearby area",
+    value="Covina",
+    placeholder="Example: Covina, Pasadena, Glendora"
 )
 
 xray_only = st.checkbox("X-ray only", value=True)
-max_miles = st.slider("Max distance", 5, 60, 25)
 
-if st.button("Find best Exer"):
-    if not location:
-        st.warning("Enter your location first.")
-        st.stop()
-
-    user_coords = geocode(location)
-
-    if not user_coords:
-        st.error("Could not find that location. Try a ZIP code.")
-        st.stop()
-
+if st.button("Find Exer locations"):
+    clinics = get_clinics()
     results = []
 
-    for clinic in get_clinics():
+    for clinic in clinics:
         if xray_only and not clinic["xray"]:
             continue
 
-        clinic_coords = geocode(clinic["address"])
-        if not clinic_coords:
-            continue
+        text = (clinic["name"] + " " + clinic["address"]).lower()
 
-        miles = geodesic(user_coords, clinic_coords).miles
-
-        if miles <= max_miles:
-            estimated_wait = clinic["wait_num"] * 8
-            estimated_drive = miles * 2.2
-            score = estimated_wait + estimated_drive
-
-            clinic["miles"] = miles
-            clinic["estimated_wait"] = estimated_wait
-            clinic["score"] = score
+        if search_area.lower() in text:
             results.append(clinic)
 
-    results.sort(key=lambda x: x["score"])
-
     if not results:
-        st.warning("No nearby Exer locations found.")
+        st.warning("No matching Exer locations found. Try another nearby city like Pasadena or Glendora.")
     else:
         for i, clinic in enumerate(results, start=1):
             st.subheader(f"{i}. {clinic['name']}")
             st.write(clinic["address"])
-            st.write(f"Distance: {clinic['miles']:.1f} miles")
             st.write(f"Line: {clinic['wait']}")
-            st.write(f"Estimated wait: {clinic['estimated_wait']} minutes")
             st.write(f"X-ray: {'YES' if clinic['xray'] else 'NO'}")
 
             maps_url = "https://www.google.com/maps/search/?api=1&query=" + clinic["address"].replace(" ", "+")
