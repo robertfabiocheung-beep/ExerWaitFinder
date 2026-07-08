@@ -9,16 +9,68 @@ from bs4 import BeautifulSoup
 from streamlit_js_eval import get_geolocation
 
 EXER_URL = "https://exerurgentcare.com/exer-locations/"
-HEADERS = {"User-Agent": "ExerWaitFinder/1.0 robert personal Streamlit app"}
+HEADERS = {"User-Agent": "ExerWaitFinder/1.0"}
 
 PHONE_RE = re.compile(r"(\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{4}|\d{10})")
 WAIT_RE = re.compile(r"(\d+)\s+patients?\s+in\s+line", re.IGNORECASE)
 
 
+FALLBACK_COORDS = {
+    # Common SoCal cities
+    "arcadia": (34.1397, -118.0353),
+    "san gabriel": (34.0961, -118.1058),
+    "alhambra": (34.0953, -118.1270),
+    "pasadena": (34.1478, -118.1445),
+    "covina": (34.0900, -117.8903),
+    "west covina": (34.0686, -117.9390),
+    "glendora": (34.1361, -117.8653),
+    "azusa": (34.1336, -117.9076),
+    "baldwin park": (34.0853, -117.9609),
+    "monrovia": (34.1481, -118.0019),
+    "duarte": (34.1395, -117.9773),
+    "el monte": (34.0686, -118.0276),
+    "temple city": (34.1072, -118.0578),
+    "rosemead": (34.0806, -118.0728),
+    "montebello": (34.0165, -118.1138),
+    "whittier": (33.9792, -118.0328),
+    "inglewood": (33.9617, -118.3531),
+    "los angeles": (34.0522, -118.2437),
+    "burbank": (34.1808, -118.3090),
+    "glendale": (34.1425, -118.2551),
+    "la canada": (34.1992, -118.1879),
+    "la canada flintridge": (34.1992, -118.1879),
+    "eagle rock": (34.1390, -118.2148),
+    "beverly hills": (34.0736, -118.4004),
+    "calabasas": (34.1367, -118.6615),
+    "culver city": (34.0211, -118.3965),
+    "santa monica": (34.0195, -118.4912),
+    "torrance": (33.8358, -118.3406),
+    "redondo beach": (33.8492, -118.3884),
+    "manhattan beach": (33.8847, -118.4109),
+    "long beach": (33.7701, -118.1937),
+    "anaheim": (33.8366, -117.9143),
+    "irvine": (33.6846, -117.8265),
+    "beaumont": (33.9295, -116.9772),
+
+    # Common ZIPs around you
+    "91722": (34.0975, -117.9067),
+    "91723": (34.0900, -117.8903),
+    "91724": (34.0878, -117.8553),
+    "91776": (34.0961, -118.1058),
+    "91775": (34.1150, -118.0900),
+    "91801": (34.0953, -118.1270),
+    "91803": (34.0743, -118.1456),
+    "91007": (34.1250, -118.0578),
+    "91006": (34.1397, -118.0353),
+}
+
+
 def wait_to_number(text):
     text = text or ""
+
     if "no patients" in text.lower():
         return 0
+
     match = WAIT_RE.search(text)
     return int(match.group(1)) if match else 999
 
@@ -47,6 +99,7 @@ def clean_lines(text):
 
 def looks_like_address(line):
     line_lower = line.lower()
+
     return (
         bool(re.search(r"\d+", line))
         and any(
@@ -74,6 +127,12 @@ def looks_like_address(line):
                 "westlake",
                 "silver spur",
                 "the old road",
+                "euclid",
+                "college",
+                "robertson",
+                "agoura",
+                "grand",
+                "rowland",
             ]
         )
     )
@@ -85,17 +144,46 @@ def geocode_text(text):
     if not text:
         return None
 
+    key = text.lower().strip()
+
+    # First: local hardcoded fallback
+    if key in FALLBACK_COORDS:
+        return FALLBACK_COORDS[key]
+
     try:
-        if re.fullmatch(r"\d{5}", text):
+        # Second: ZIP code lookup
+        if re.fullmatch(r"\d{5}", key):
             response = requests.get(
-                f"https://api.zippopotam.us/us/{text}",
+                f"https://api.zippopotam.us/us/{key}",
                 timeout=10,
             )
+
             if response.status_code == 200:
                 data = response.json()
                 place = data["places"][0]
                 return float(place["latitude"]), float(place["longitude"])
 
+        # Third: city lookup using Open-Meteo
+        response = requests.get(
+            "https://geocoding-api.open-meteo.com/v1/search",
+            params={
+                "name": text,
+                "count": 1,
+                "language": "en",
+                "format": "json",
+                "countryCode": "US",
+            },
+            timeout=10,
+        )
+
+        if response.status_code == 200:
+            data = response.json()
+
+            if "results" in data and data["results"]:
+                result = data["results"][0]
+                return float(result["latitude"]), float(result["longitude"])
+
+        # Fourth: address lookup using Nominatim
         query = text
         if "california" not in query.lower() and ", ca" not in query.lower():
             query += ", California, USA"
@@ -112,12 +200,11 @@ def geocode_text(text):
             timeout=15,
         )
 
-        if response.status_code != 200:
-            return None
+        if response.status_code == 200:
+            data = response.json()
 
-        data = response.json()
-        if data:
-            return float(data[0]["lat"]), float(data[0]["lon"])
+            if data:
+                return float(data[0]["lat"]), float(data[0]["lon"])
 
     except Exception:
         return None
@@ -131,14 +218,13 @@ def geocode_clinic_address(address):
     if not address:
         return None
 
-    # Try the plain street address first. If that fails, try with the brand name.
-    for query in [address, f"Exer Urgent Care, {address}"]:
+    for query in [f"Exer Urgent Care, {address}", address]:
         coords = geocode_text(query)
+
         if coords:
             return coords
 
-        # Be polite to the free geocoder on first cache build.
-        time.sleep(1)
+        time.sleep(0.5)
 
     return None
 
@@ -155,13 +241,14 @@ def get_clinics_raw():
 
     for card in cards:
         lines = clean_lines(card.get_text("\n", strip=True))
+
         if len(lines) < 2:
             continue
 
         name = lines[0]
 
         address = None
-        for line in lines[1:6]:
+        for line in lines[1:8]:
             if looks_like_address(line):
                 address = line
                 break
@@ -178,6 +265,7 @@ def get_clinics_raw():
         xray = not any("no x-ray available" in line.lower() for line in lines)
 
         key = f"{name}|{address}"
+
         clinics[key] = {
             "name": name,
             "address": address,
@@ -196,6 +284,7 @@ def get_clinics_with_coords():
 
     for clinic in get_clinics_raw():
         coords = geocode_clinic_address(clinic["address"])
+
         if coords:
             clinic = clinic.copy()
             clinic["coords"] = coords
@@ -235,19 +324,21 @@ location_source = st.radio(
 
 typed_location = st.text_input(
     "City, ZIP, or address",
-    value="91722",
-    placeholder="Inglewood, 91722, Covina, Pasadena, 123 Main St",
+    value="Arcadia",
+    placeholder="Arcadia, 91722, Inglewood, Pasadena, or full address",
 )
 
 gps_location = get_geolocation()
 
 gps_coords = None
+
 if gps_location and "coords" in gps_location:
     gps_coords = (
         gps_location["coords"]["latitude"],
         gps_location["coords"]["longitude"],
     )
     st.success("GPS location received.")
+
 elif gps_location and "error" in gps_location:
     st.warning("GPS was blocked or unavailable. You can still use typed location.")
 
@@ -259,14 +350,14 @@ else:
 if not user_coords:
     st.error(
         "No usable location yet. Try a full ZIP code, city, or address. "
-        "Example: 91722, Inglewood, Pasadena, or Covina."
+        "Example: Arcadia, 91722, Inglewood, Pasadena, or Covina."
     )
 
 if st.button("Find best Exer", type="primary"):
     if not user_coords:
         st.stop()
 
-    with st.spinner("Checking Exer locations... first run can take a minute while addresses are verified."):
+    with st.spinner("Checking Exer locations... first run may take a minute."):
         clinics = get_clinics_with_coords()
 
     results = []
@@ -286,11 +377,13 @@ if st.button("Find best Exer", type="primary"):
 
     if not results:
         st.warning(
-            f"No Exer within a reasonable distance. Try increasing the distance above {max_miles} miles "
-            "or turning off X-ray only."
+            f"No Exer within a reasonable distance. Try increasing the distance above "
+            f"{max_miles} miles or turning off X-ray only."
         )
+
     else:
         best = results[0]
+
         st.success(
             f"Best match: {best['name']} — {best['wait']} — {best['miles']:.1f} miles away"
         )
@@ -298,8 +391,10 @@ if st.button("Find best Exer", type="primary"):
         for i, clinic in enumerate(results, start=1):
             st.subheader(f"{i}. {clinic['name']}")
             st.write(clinic["address"])
+
             if clinic["phone"]:
                 st.write(f"Phone: {clinic['phone']}")
+
             st.write(f"Line: {clinic['wait']}")
             st.write(f"Distance: {clinic['miles']:.1f} miles")
             st.write(f"X-ray: {'YES' if clinic['xray'] else 'NO'}")
@@ -307,4 +402,5 @@ if st.button("Find best Exer", type="primary"):
             st.markdown(
                 f"[Open correct directions in Google Maps]({maps_url(clinic['coords'], user_coords)})"
             )
+
             st.divider()
