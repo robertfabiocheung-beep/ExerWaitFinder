@@ -125,7 +125,20 @@ st.caption("Ranks Exer clinics by shortest wait first, then nearest distance.")
 xray_only = st.checkbox("X-ray only", value=True)
 max_miles = st.slider("Max distance", 5, 60, 25)
 
-st.subheader("Use GPS")
+st.subheader("Choose location source")
+
+location_source = st.radio(
+    "Location source",
+    ["Use typed location", "Use GPS location"],
+    index=0,
+)
+
+typed_location = st.text_input(
+    "City or ZIP",
+    value="San Gabriel",
+    placeholder="San Gabriel, Covina, Pasadena, 91776",
+)
+
 gps_location = get_geolocation()
 
 gps_coords = None
@@ -136,19 +149,19 @@ if gps_location and "coords" in gps_location:
     )
     st.success("GPS location received.")
 elif gps_location and "error" in gps_location:
-    st.warning("GPS was blocked or unavailable. Use the location box below.")
+    st.warning("GPS was blocked or unavailable. You can still use typed location.")
 
-st.subheader("Or enter a city / ZIP")
-typed_location = st.text_input(
-    "Location",
-    value="San Gabriel",
-    placeholder="San Gabriel, Covina, Pasadena, 91776",
-)
-
-user_coords = gps_coords or get_known_location(typed_location)
+if location_source == "Use GPS location":
+    user_coords = gps_coords
+else:
+    user_coords = get_known_location(typed_location)
 
 if not user_coords:
-    st.error("I don't know that location yet. Try San Gabriel, Pasadena, Covina, Glendora, Arcadia, Alhambra, Montebello, or a nearby ZIP.")
+    st.error(
+        "No usable location yet. If using GPS, allow location permission. "
+        "If typing, try San Gabriel, Pasadena, Covina, Glendora, Arcadia, "
+        "Alhambra, Montebello, Whittier, West Covina, or a nearby ZIP."
+    )
 
 if st.button("Find best Exer", type="primary"):
     if not user_coords:
