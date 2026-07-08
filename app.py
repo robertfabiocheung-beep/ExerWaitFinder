@@ -1,6 +1,5 @@
 import math
 import re
-import time
 import urllib.parse
 
 import requests
@@ -15,8 +14,8 @@ PHONE_RE = re.compile(r"(\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{4}|\d{10})")
 WAIT_RE = re.compile(r"(\d+)\s+patients?\s+in\s+line", re.IGNORECASE)
 
 
+# User location fallback: cities and ZIPs
 FALLBACK_COORDS = {
-    # Common SoCal cities
     "arcadia": (34.1397, -118.0353),
     "san gabriel": (34.0961, -118.1058),
     "alhambra": (34.0953, -118.1270),
@@ -49,10 +48,10 @@ FALLBACK_COORDS = {
     "manhattan beach": (33.8847, -118.4109),
     "long beach": (33.7701, -118.1937),
     "anaheim": (33.8366, -117.9143),
+    "orange": (33.7879, -117.8531),
     "irvine": (33.6846, -117.8265),
     "beaumont": (33.9295, -116.9772),
 
-    # Common ZIPs around you
     "91722": (34.0975, -117.9067),
     "91723": (34.0900, -117.8903),
     "91724": (34.0878, -117.8553),
@@ -63,6 +62,52 @@ FALLBACK_COORDS = {
     "91007": (34.1250, -118.0578),
     "91006": (34.1397, -118.0353),
 }
+
+
+# Trusted Exer clinic coordinates.
+# This prevents wrong Google Maps destinations and wrong distance ranking.
+CLINIC_COORDS = {
+    "Anaheim – Euclid St": (33.7952, -117.9419),
+    "Anaheim – State College Blvd": (33.8227, -117.8892),
+    "Beaumont": (33.9364, -116.9444),
+    "Beverly Hills": (34.0613, -118.3834),
+    "Calabasas – Agoura Rd": (34.1441, -118.7087),
+    "Covina": (34.0789, -117.8947),
+    "Glendora": (34.1138, -117.8720),
+    "Orange": (33.7824, -117.8674),
+
+    "Pasadena – Allen Ave": (34.1502, -118.1135),
+    "Pasadena – East Del Mar Blvd": (34.1413, -118.0846),
+    "Pasadena – Lake Ave": (34.1359, -118.1321),
+    "Pasadena – South Fair Oaks Ave": (34.1308, -118.1507),
+
+    "La Canada Flintridge": (34.1995, -118.1880),
+    "La Cañada Flintridge": (34.1995, -118.1880),
+    "Eagle Rock": (34.1260, -118.2171),
+    "Glendale": (34.1467, -118.2600),
+    "Montebello": (34.0336, -118.1217),
+    "Whittier": (33.9698, -118.0422),
+
+    "Culver City": (34.0250, -118.3950),
+    "Manhattan Beach": (33.8847, -118.4109),
+    "Redondo Beach": (33.8492, -118.3884),
+    "Torrance": (33.8358, -118.3406),
+    "Santa Monica": (34.0195, -118.4912),
+    "Westlake Village": (34.1458, -118.8056),
+    "Northridge": (34.2381, -118.5301),
+    "Sherman Oaks": (34.1511, -118.4492),
+    "Stevenson Ranch": (34.3905, -118.5736),
+    "Porter Ranch": (34.2822, -118.5614),
+}
+
+
+def normalize_name(name):
+    return (
+        name.strip()
+        .replace("—", "–")
+        .replace("-", "–")
+        .replace("  ", " ")
+    )
 
 
 def wait_to_number(text):
@@ -133,25 +178,28 @@ def looks_like_address(line):
                 "agoura",
                 "grand",
                 "rowland",
+                "main",
+                "fair oaks",
+                "del mar",
+                "lake",
+                "allen",
             ]
         )
     )
 
 
 @st.cache_data(ttl=86400)
-def geocode_text(text):
+def geocode_user_location(text):
     text = (text or "").strip()
     if not text:
         return None
 
     key = text.lower().strip()
 
-    # First: local hardcoded fallback
     if key in FALLBACK_COORDS:
         return FALLBACK_COORDS[key]
 
     try:
-        # Second: ZIP code lookup
         if re.fullmatch(r"\d{5}", key):
             response = requests.get(
                 f"https://api.zippopotam.us/us/{key}",
@@ -163,7 +211,7 @@ def geocode_text(text):
                 place = data["places"][0]
                 return float(place["latitude"]), float(place["longitude"])
 
-        # Third: city lookup using Open-Meteo
+        # City lookup
         response = requests.get(
             "https://geocoding-api.open-meteo.com/v1/search",
             params={
@@ -183,7 +231,7 @@ def geocode_text(text):
                 result = data["results"][0]
                 return float(result["latitude"]), float(result["longitude"])
 
-        # Fourth: address lookup using Nominatim
+        # Address lookup
         query = text
         if "california" not in query.lower() and ", ca" not in query.lower():
             query += ", California, USA"
@@ -212,23 +260,6 @@ def geocode_text(text):
     return None
 
 
-@st.cache_data(ttl=86400)
-def geocode_clinic_address(address):
-    address = (address or "").strip()
-    if not address:
-        return None
-
-    for query in [f"Exer Urgent Care, {address}", address]:
-        coords = geocode_text(query)
-
-        if coords:
-            return coords
-
-        time.sleep(0.5)
-
-    return None
-
-
 @st.cache_data(ttl=300)
 def get_clinics_raw():
     response = requests.get(EXER_URL, headers=HEADERS, timeout=25)
@@ -245,10 +276,10 @@ def get_clinics_raw():
         if len(lines) < 2:
             continue
 
-        name = lines[0]
+        name = normalize_name(lines[0])
 
         address = None
-        for line in lines[1:8]:
+        for line in lines[1:10]:
             if looks_like_address(line):
                 address = line
                 break
@@ -264,6 +295,21 @@ def get_clinics_raw():
         phone = next((line for line in lines if PHONE_RE.search(line)), "")
         xray = not any("no x-ray available" in line.lower() for line in lines)
 
+        # Trusted coordinate lookup
+        coords = CLINIC_COORDS.get(name)
+
+        # If exact name fails, try loose match
+        if not coords:
+            for known_name, known_coords in CLINIC_COORDS.items():
+                if name.lower() == known_name.lower():
+                    coords = known_coords
+                    break
+
+        # Skip clinics we don't have safe coordinates for.
+        # Better to omit than send user to the wrong place.
+        if not coords:
+            continue
+
         key = f"{name}|{address}"
 
         clinics[key] = {
@@ -273,24 +319,10 @@ def get_clinics_raw():
             "wait_num": wait_to_number(wait),
             "xray": xray,
             "phone": phone,
+            "coords": coords,
         }
 
     return list(clinics.values())
-
-
-@st.cache_data(ttl=86400)
-def get_clinics_with_coords():
-    clinics = []
-
-    for clinic in get_clinics_raw():
-        coords = geocode_clinic_address(clinic["address"])
-
-        if coords:
-            clinic = clinic.copy()
-            clinic["coords"] = coords
-            clinics.append(clinic)
-
-    return clinics
 
 
 def maps_url(destination_coords, origin=None):
@@ -309,7 +341,7 @@ def maps_url(destination_coords, origin=None):
 st.set_page_config(page_title="Exer", page_icon="🏥", layout="centered")
 
 st.title("Exer Wait Finder")
-st.caption("Shortest wait first, then nearest distance. Directions use clinic GPS coordinates.")
+st.caption("Shortest wait first, then nearest distance. Directions use verified clinic coordinates.")
 
 xray_only = st.checkbox("X-ray only", value=True)
 max_miles = st.slider("Max distance", 5, 100, 25)
@@ -324,8 +356,8 @@ location_source = st.radio(
 
 typed_location = st.text_input(
     "City, ZIP, or address",
-    value="Arcadia",
-    placeholder="Arcadia, 91722, Inglewood, Pasadena, or full address",
+    value="Alhambra",
+    placeholder="Alhambra, Arcadia, 91722, Inglewood, Pasadena, or full address",
 )
 
 gps_location = get_geolocation()
@@ -345,20 +377,20 @@ elif gps_location and "error" in gps_location:
 if location_source == "Use GPS location":
     user_coords = gps_coords
 else:
-    user_coords = geocode_text(typed_location)
+    user_coords = geocode_user_location(typed_location)
 
 if not user_coords:
     st.error(
         "No usable location yet. Try a full ZIP code, city, or address. "
-        "Example: Arcadia, 91722, Inglewood, Pasadena, or Covina."
+        "Example: Alhambra, Arcadia, 91722, Inglewood, Pasadena, or Covina."
     )
 
 if st.button("Find best Exer", type="primary"):
     if not user_coords:
         st.stop()
 
-    with st.spinner("Checking Exer locations... first run may take a minute."):
-        clinics = get_clinics_with_coords()
+    with st.spinner("Checking Exer locations..."):
+        clinics = get_clinics_raw()
 
     results = []
 
