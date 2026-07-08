@@ -13,8 +13,6 @@ HEADERS = {"User-Agent": "ExerWaitFinder/1.0"}
 PHONE_RE = re.compile(r"(\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{4}|\d{10})")
 WAIT_RE = re.compile(r"(\d+)\s+patients?\s+in\s+line", re.IGNORECASE)
 
-
-# User location fallback: cities and ZIPs
 FALLBACK_COORDS = {
     "arcadia": (34.1397, -118.0353),
     "san gabriel": (34.0961, -118.1058),
@@ -63,9 +61,7 @@ FALLBACK_COORDS = {
     "91006": (34.1397, -118.0353),
 }
 
-
-# Trusted Exer clinic coordinates.
-# This prevents wrong Google Maps destinations and wrong distance ranking.
+# Used only for distance sorting. Directions now use Exer's own Google Maps link.
 CLINIC_COORDS = {
     "Anaheim – Euclid St": (33.7952, -117.9419),
     "Anaheim – State College Blvd": (33.8227, -117.8892),
@@ -112,10 +108,8 @@ def normalize_name(name):
 
 def wait_to_number(text):
     text = text or ""
-
     if "no patients" in text.lower():
         return 0
-
     match = WAIT_RE.search(text)
     return int(match.group(1)) if match else 999
 
@@ -211,7 +205,6 @@ def geocode_user_location(text):
                 place = data["places"][0]
                 return float(place["latitude"]), float(place["longitude"])
 
-        # City lookup
         response = requests.get(
             "https://geocoding-api.open-meteo.com/v1/search",
             params={
@@ -231,7 +224,6 @@ def geocode_user_location(text):
                 result = data["results"][0]
                 return float(result["latitude"]), float(result["longitude"])
 
-        # Address lookup
         query = text
         if "california" not in query.lower() and ", ca" not in query.lower():
             query += ", California, USA"
@@ -258,6 +250,11 @@ def geocode_user_location(text):
         return None
 
     return None
+
+
+def fallback_maps_url(address):
+    query = urllib.parse.quote_plus(address)
+    return f"https://www.google.com/maps/search/?api=1&query={query}"
 
 
 @st.cache_data(ttl=300)
@@ -295,20 +292,34 @@ def get_clinics_raw():
         phone = next((line for line in lines if PHONE_RE.search(line)), "")
         xray = not any("no x-ray available" in line.lower() for line in lines)
 
-        # Trusted coordinate lookup
+        # Manual correction: Orange should not be treated as X-ray available.
+        if name.lower().strip() == "orange":
+            xray = False
+
         coords = CLINIC_COORDS.get(name)
 
-        # If exact name fails, try loose match
         if not coords:
             for known_name, known_coords in CLINIC_COORDS.items():
                 if name.lower() == known_name.lower():
                     coords = known_coords
                     break
 
-        # Skip clinics we don't have safe coordinates for.
-        # Better to omit than send user to the wrong place.
         if not coords:
             continue
+
+        # IMPORTANT:
+        # Use Exer's own Get directions link if present.
+        # This avoids wrong destinations caused by our own generated Google Maps URLs.
+        directions_url = None
+        for a in card.find_all("a", href=True):
+            label = a.get_text(" ", strip=True).lower()
+            href = a["href"]
+            if "directions" in label or "google.com/maps" in href:
+                directions_url = href
+                break
+
+        if not directions_url:
+            directions_url = fallback_maps_url(address)
 
         key = f"{name}|{address}"
 
@@ -320,30 +331,23 @@ def get_clinics_raw():
             "xray": xray,
             "phone": phone,
             "coords": coords,
+            "directions_url": directions_url,
         }
 
     return list(clinics.values())
 
 
-def maps_url(destination_coords, origin=None):
-    params = {
-        "api": "1",
-        "destination": f"{destination_coords[0]},{destination_coords[1]}",
-        "travelmode": "driving",
-    }
-
-    if origin:
-        params["origin"] = f"{origin[0]},{origin[1]}"
-
-    return "https://www.google.com/maps/dir/?" + urllib.parse.urlencode(params)
-
-
 st.set_page_config(page_title="Exer", page_icon="🏥", layout="centered")
 
 st.title("Exer Wait Finder")
-st.caption("Shortest wait first, then nearest distance. Directions use verified clinic coordinates.")
+st.caption("Shortest wait first, then nearest distance. Directions use Exer's own map links.")
 
-xray_only = st.checkbox("X-ray only", value=True)
+xray_only = st.checkbox("Show only locations currently marked X-ray available", value=False)
+st.caption(
+    "X-ray availability may change by time of day or staffing. "
+    "Call the clinic before going for X-ray."
+)
+
 max_miles = st.slider("Max distance", 5, 100, 25)
 
 st.subheader("Choose location source")
@@ -432,7 +436,7 @@ if st.button("Find best Exer", type="primary"):
             st.write(f"X-ray: {'YES' if clinic['xray'] else 'NO'}")
 
             st.markdown(
-                f"[Open correct directions in Google Maps]({maps_url(clinic['coords'], user_coords)})"
+                f"[Open directions in Google Maps]({clinic['directions_url']})"
             )
 
             st.divider()
